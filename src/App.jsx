@@ -1,14 +1,11 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { v4 as uuidv4 } from 'uuid';
-
-// --- FIREBASE IMPORTS ---
 import { 
     initializeApp 
 } from 'firebase/app';
 import { 
     getAuth, 
     signInAnonymously, 
-    signInWithCustomToken, 
     onAuthStateChanged,
 } from 'firebase/auth';
 import { 
@@ -23,42 +20,40 @@ import {
     setLogLevel,
     doc,
     deleteDoc,
-    where,
     writeBatch,
     getDocs,
     setDoc
 } from 'firebase/firestore';
 
 
-// --- ENVIRONMENT VARIABLE HANDLING ---
-// Variables injected by the Canvas environment for secure setup.
-const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
-const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
-
-// --- API and TTS/STT Helper Functions ---
-
-// 1. API Key Getter
-const getApiKey = () => {
-    // Check for the secure, environment-provided key first
-    if (typeof __api_key !== 'undefined') { 
-        return __api_key; 
-    }
-    // Fallback: Use an empty string if running locally without the Canvas environment.
-    return ''; 
+// --- CONFIGURATION FOR GITHUB DEPLOYMENT ---
+// This configuration is hardcoded as environment variables are not available on GitHub Pages.
+const FIREBASE_CONFIG = {
+    apiKey: "AIzaSyACbU7QPgmUkvn1cmIIytlUK8FI0xBHhmE",
+    authDomain: "mene-bot.firebaseapp.com",
+    projectId: "mene-bot",
+    storageBucket: "mene-bot.firebasestorage.app",
+    messagingSenderId: "535679609146",
+    appId: "1:535679609146:web:750fcd7b478d93bcae8803",
+    measurementId: "G-Q7ET9SGXB8"
 };
 
-const GEMINI_API_KEY = getApiKey();
+// Use the Firebase Project ID as the logical application identifier for Firestore paths
+const APP_ID = FIREBASE_CONFIG.projectId;
+
+// Use the API key provided in the original fallback
+const GEMINI_API_KEY = 'AIzaSyD0fDB4XPYTSONxvbLTUCLznwzLWWV11ys'; 
+
+// --- API and TTS/STT Helper Functions ---
 const MODEL_NAME = 'gemini-2.5-flash-preview-09-2025';
 const API_ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL_NAME}:generateContent?key=${GEMINI_API_KEY}`;
 const TTS_API_ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${GEMINI_API_KEY}`;
 
 
-// 2. Gemini Stream Simulation
 /**
  * Creates an Async Iterator that handles the AI request and simulates a stream.
  */
-export function askAIStream(inputText, chatHistory) {
+function askAIStream(inputText, chatHistory) {
     let fullResponse = null;
     let chunks = [];
     let chunkIndex = 0;
@@ -92,28 +87,25 @@ export function askAIStream(inputText, chatHistory) {
                     
                     const data = await response.json();
                     
-                    // Extract the text from the API's response structure
                     fullResponse = data.candidates?.[0]?.content?.parts?.[0]?.text || "No response received from AI.";
                     
                     // Split the full response to simulate the streaming effect
-                    // Splits by word and preserves spaces for better visual flow
                     chunks = fullResponse.split(/(\s+)/).filter(c => c.length > 0); 
                 }
 
                 // Subsequent calls: Stream out the chunks one by one
                 if (chunkIndex >= chunks.length) {
-                    return { done: true, value: fullResponse }; // Return full response on finish
+                    return { done: true, value: fullResponse }; 
                 }
 
-                // Small delay to simulate streaming visually
-                await new Promise((r) => setTimeout(r, 20));
+                await new Promise((r) => setTimeout(r, 0));
+
 
                 const chunk = chunks[chunkIndex++];
                 return { value: chunk, done: false };
 
             } catch (error) {
                 console.error("Gemini API Error:", error);
-                // Return a user-friendly error message
                 return { value: `ERROR: Failed to connect to AI. Details: ${error.message}`, done: true };
             }
         },
@@ -123,8 +115,6 @@ export function askAIStream(inputText, chatHistory) {
     };
 }
 
-
-// 3. TTS Utility Functions
 
 /**
  * Converts a base64 string to an ArrayBuffer.
@@ -140,45 +130,43 @@ const base64ToArrayBuffer = (base64) => {
 };
 
 /**
+ * Writes a string to a DataView at a specified offset.
+ */
+const writeString = (view, offset, string) => {
+    for (let i = 0; i < string.length; i++) {
+        view.setUint8(offset + i, string.charCodeAt(i));
+    }
+};
+
+/**
  * Converts PCM (raw audio data) to a standard WAV format Blob.
- * @param {Int16Array} pcm16 - 16-bit PCM audio data.
- * @param {number} sampleRate - Sample rate of the audio (e.g., 24000).
- * @returns {Blob} - A Blob containing the WAV file data.
  */
 const pcmToWav = (pcm16, sampleRate) => {
     const numChannels = 1;
     const numSamples = pcm16.length;
-    const byteRate = sampleRate * numChannels * 2; // 2 bytes per sample (16 bit)
+    const byteRate = sampleRate * numChannels * 2; 
     const blockAlign = numChannels * 2;
 
     const buffer = new ArrayBuffer(44 + pcm16.byteLength);
     const view = new DataView(buffer);
 
-    // RIFF identifier 'RIFF'
+    // RIFF header
     writeString(view, 0, 'RIFF');
-    // RIFF chunk length
     view.setUint32(4, 36 + pcm16.byteLength, true);
-    // WAVE identifier 'WAVE'
     writeString(view, 8, 'WAVE');
-    // format chunk identifier 'fmt '
+    
+    // fmt sub-chunk
     writeString(view, 12, 'fmt ');
-    // format chunk length 
     view.setUint32(16, 16, true);
-    // sample format (1 for PCM)
-    view.setUint16(20, 1, true);
-    // number of channels
+    view.setUint16(20, 1, true); // Audio format 1 (PCM)
     view.setUint16(22, numChannels, true);
-    // sample rate
     view.setUint32(24, sampleRate, true);
-    // byte rate
     view.setUint32(28, byteRate, true);
-    // block align
     view.setUint16(32, blockAlign, true);
-    // bits per sample
-    view.setUint16(34, 16, true);
-    // data chunk identifier 'data'
+    view.setUint16(34, 16, true); // Bits per sample
+    
+    // data sub-chunk
     writeString(view, 36, 'data');
-    // data chunk length
     view.setUint32(40, pcm16.byteLength, true);
 
     // PCM data
@@ -186,15 +174,6 @@ const pcmToWav = (pcm16, sampleRate) => {
     pcmView.set(pcm16);
 
     return new Blob([buffer], { type: 'audio/wav' });
-};
-
-/**
- * Writes a string to a DataView at a specified offset.
- */
-const writeString = (view, offset, string) => {
-    for (let i = 0; i < string.length; i++) {
-        view.setUint8(offset + i, string.charCodeAt(i));
-    }
 };
 
 /**
@@ -210,7 +189,6 @@ const ttsApiCall = async (text, setErrorMessage) => {
                 responseModalities: ["AUDIO"],
                 speechConfig: {
                     voiceConfig: {
-                        // Using a clear, friendly voice
                         prebuiltVoiceConfig: { voiceName: "Achird" } 
                     }
                 }
@@ -233,7 +211,6 @@ const ttsApiCall = async (text, setErrorMessage) => {
         const mimeType = part?.inlineData?.mimeType;
 
         if (audioData && mimeType && mimeType.startsWith("audio/L16")) {
-            // Extract sample rate from mimeType, e.g., audio/L16;rate=24000
             const rateMatch = mimeType.match(/rate=(\d+)/);
             const sampleRate = rateMatch ? parseInt(rateMatch[1], 10) : 24000; 
 
@@ -253,47 +230,17 @@ const ttsApiCall = async (text, setErrorMessage) => {
     }
 };
 
-
-// 4. Speech Recognition (STT) Utility
-let recognition = null;
-const setupRecognition = (onResult) => {
-    // Check for browser compatibility (webkitSpeechRecognition is the most common implementation)
-    if ('webkitSpeechRecognition' in window) {
-        // We must use `window.webkitSpeechRecognition` as standard `SpeechRecognition` might not be available
-        recognition = new window.webkitSpeechRecognition(); 
-        recognition.continuous = false;
-        recognition.interimResults = false;
-        recognition.lang = 'en-US';
-
-        recognition.onresult = (event) => {
-            const transcript = event.results[0][0].transcript;
-            onResult(transcript);
-        };
-
-        recognition.onerror = (event) => {
-            console.error('Speech recognition error:', event.error);
-        };
-
-        recognition.onend = () => {
-            console.log('Speech recognition ended.');
-            setIsListening(false); // Make sure to update state on end/error
-        };
-
-        return true;
-    }
-    return false;
-};
-
-
-// 5. Common Collection Paths
-const SESSIONS_COLLECTION_PATH = `/artifacts/${appId}/users`;
+// --- Firestore Collection Paths (using private user data model) ---
+const SESSIONS_COLLECTION_PATH = `/artifacts/${APP_ID}/users`;
 const MESSAGES_COLLECTION_PATH = (userId, sessionId) => 
-    `/artifacts/${appId}/users/${userId}/sessions/${sessionId}/messages`;
+    `/artifacts/${APP_ID}/users/${userId}/sessions/${sessionId}/messages`;
 
 
 // --- UI Components (Defined locally for single-file mandate) ---
 
 const Sidebar = React.memo(({ sessions, currentSessionId, switchSession, createNewSession, deleteSession, userId }) => {
+    const displayUserId = userId ? `${userId.substring(0, 8)}...` : "N/A";
+    
     return (
         <div className="w-full md:w-64 bg-gray-50 border-r border-gray-200 p-4 flex flex-col transition-all duration-300">
             <h2 className="text-xl font-bold text-gray-800 mb-4 flex items-center justify-between">
@@ -303,7 +250,9 @@ const Sidebar = React.memo(({ sessions, currentSessionId, switchSession, createN
                     className="p-2 bg-green-500 text-white rounded-full hover:bg-green-600 transition duration-150 shadow-md"
                     title="New Chat"
                 >
-                    +
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                        <path fillRule="evenodd" d="M10 5a1 1 0 011 1v3h3a1 1 0 110 2h-3v3a1 1 0 11-2 0v-3H6a1 1 0 110-2h3V6a1 1 0 011-1z" clipRule="evenodd" />
+                    </svg>
                 </button>
             </h2>
 
@@ -328,7 +277,7 @@ const Sidebar = React.memo(({ sessions, currentSessionId, switchSession, createN
                 ))}
             </div>
             <div className="mt-4 pt-4 border-t border-gray-200 text-sm text-gray-500">
-                User ID: <span className="font-mono text-xs">{userId ? `${userId.substring(0, 8)}...` : "N/A"}</span>
+                User ID: <span className="font-mono text-xs">{displayUserId}</span>
             </div>
         </div>
     );
@@ -352,59 +301,74 @@ export default function App() {
     const [isTyping, setIsTyping] = useState(false);
     const [errorMessage, setErrorMessage] = useState(null);
     const messageEndRef = useRef(null);
-    const [isSidebarOpen, setIsSidebarOpen] = useState(window.innerWidth >= 768); // Open by default on desktop
+    const [isSidebarOpen, setIsSidebarOpen] = useState(window.innerWidth >= 768); 
 
     // --- TTS/STT State ---
     const [canSpeak, setCanSpeak] = useState(false);
-    const [isListening, setIsListening] = useState(false);
+    const [isListening, setIsListening] = useState(false); 
     const [lastBotMessage, setLastBotMessage] = useState(null);
-    const recognitionRef = useRef(null); // Ref for speech recognition instance
+    const recognitionRef = useRef(null); 
 
-    // --- Effects ---
 
     // 1. Initialize Firebase and Authentication
     useEffect(() => {
-        if (firebaseConfig) {
-            try {
-                const app = initializeApp(firebaseConfig);
-                const firestore = getFirestore(app);
-                const authentication = getAuth(app);
+        try {
+            const app = initializeApp(FIREBASE_CONFIG);
+            const firestore = getFirestore(app);
+            const authentication = getAuth(app);
 
-                // Enable debug logging for better development visibility
-                setLogLevel('debug'); 
-                setDb(firestore);
-                setAuth(authentication);
+            setLogLevel('debug'); 
+            setDb(firestore);
+            setAuth(authentication);
 
-                const unsubscribeAuth = onAuthStateChanged(authentication, async (user) => {
-                    if (!user) {
-                        console.log("No user signed in. Attempting sign-in...");
-                        try {
-                            // If custom token is available, use it; otherwise, sign in anonymously
-                            if (initialAuthToken) {
-                                await signInWithCustomToken(authentication, initialAuthToken);
-                            } else {
-                                await signInAnonymously(authentication);
-                            }
-                        } catch (e) {
-                            console.error("Firebase Auth Error:", e);
-                            setErrorMessage("Failed to authenticate with Firebase.");
-                        }
+            const unsubscribeAuth = onAuthStateChanged(authentication, async (user) => {
+                if (!user) {
+                    console.log("No user signed in. Attempting anonymous sign-in...");
+                    try {
+                        // Use anonymous sign-in for GitHub Pages deployment
+                        await signInAnonymously(authentication);
+                    } catch (e) {
+                        console.error("Firebase Auth Error:", e);
+                        setErrorMessage("Failed to authenticate with Firebase.");
                     }
-                    // Auth state has stabilized, user is set (anonymous or custom token)
-                    setUserId(authentication.currentUser?.uid || crypto.randomUUID());
-                    setIsAuthReady(true);
-                });
+                }
+                setUserId(authentication.currentUser?.uid || crypto.randomUUID());
+                setIsAuthReady(true);
+            });
 
-                return () => unsubscribeAuth();
-            } catch (e) {
-                console.error("Firebase Init Error:", e);
-                setErrorMessage("Failed to initialize Firebase services.");
-            }
+            return () => unsubscribeAuth();
+        } catch (e) {
+            console.error("Firebase Init Error:", e);
+            setErrorMessage("Failed to initialize Firebase services.");
         }
-    }, [firebaseConfig, initialAuthToken]);
+    }, []); // Empty dependency array, runs once
 
 
     // 2. Setup Sessions Listener
+    const createSession = useCallback(async () => {
+        if (!db || !userId) return;
+
+        try {
+            const userSessionsRef = collection(db, SESSIONS_COLLECTION_PATH, userId, 'sessions');
+            const newDocRef = doc(userSessionsRef);
+            
+            const placeholderName = `Chat ${sessions.length + 1}`; 
+
+            await setDoc(newDocRef, {
+                name: placeholderName,
+                createdAt: serverTimestamp(),
+            });
+
+            setCurrentSessionId(newDocRef.id);
+            if (window.innerWidth < 768) {
+                setIsSidebarOpen(false); 
+            }
+        } catch (e) {
+            console.error("Error creating new session:", e);
+            setErrorMessage("Failed to create a new session.");
+        }
+    }, [db, userId, sessions.length]);
+
     useEffect(() => {
         if (!isAuthReady || !db || !userId) return;
 
@@ -419,12 +383,9 @@ export default function App() {
 
             setSessions(loadedSessions);
 
-            // If no sessions exist, create a new one automatically
             if (loadedSessions.length === 0) {
-                // Use a timeout to ensure state updates happen after listener setup
-                setTimeout(() => createSession(userId), 0);
+                setTimeout(() => createSession(), 0); 
             } else if (!currentSessionId || !loadedSessions.find(s => s.id === currentSessionId)) {
-                // Set to the most recent session if current one is invalid or deleted
                 setCurrentSessionId(loadedSessions[0].id);
             }
         }, (error) => {
@@ -433,18 +394,17 @@ export default function App() {
         });
 
         return () => unsubscribe();
-    }, [isAuthReady, db, userId, currentSessionId]); // Dependency on currentSessionId is required to re-evaluate logic when it changes
+    }, [isAuthReady, db, userId, currentSessionId, createSession]);
 
-    
+
     // 3. Setup Messages Listener (Current Session)
     useEffect(() => {
         if (!isAuthReady || !db || !userId || !currentSessionId) {
-            setMessages([]); // Clear messages if no session is selected
+            setMessages([]); 
             return;
         }
 
         const messagesRef = collection(db, MESSAGES_COLLECTION_PATH(userId, currentSessionId));
-        // Query last 50 messages, ordered by time
         const q = query(messagesRef, orderBy('createdAt', 'asc'), limit(50));
 
         const unsubscribe = onSnapshot(q, (snapshot) => {
@@ -454,13 +414,11 @@ export default function App() {
                     id: doc.id,
                     sender: data.sender,
                     text: data.text,
-                    // Handle Firestore Timestamp conversion
                     createdAt: data.createdAt?.toDate ? data.createdAt.toDate() : new Date(),
                 };
             });
             setMessages(loadedMessages);
 
-            // Track the last bot message for the TTS button
             const lastBot = loadedMessages.slice().reverse().find(msg => msg.sender === 'bot');
             setLastBotMessage(lastBot);
 
@@ -485,7 +443,6 @@ export default function App() {
             setCanSpeak(true);
         }
 
-        // Setup the recognition object
         if ('webkitSpeechRecognition' in window) {
             const recognitionInstance = new window.webkitSpeechRecognition();
             recognitionInstance.continuous = false;
@@ -502,7 +459,6 @@ export default function App() {
             recognitionRef.current = recognitionInstance;
         }
 
-        // Cleanup on unmount
         return () => {
             if (recognitionRef.current) {
                 recognitionRef.current.stop();
@@ -516,40 +472,14 @@ export default function App() {
     const switchSession = useCallback((sessionId) => {
         setCurrentSessionId(sessionId);
         if (window.innerWidth < 768) {
-            setIsSidebarOpen(false); // Close sidebar on mobile after selection
+            setIsSidebarOpen(false); 
         }
     }, []);
-
-    const createSession = useCallback(async () => {
-        if (!db || !userId) return;
-
-        try {
-            const userSessionsRef = collection(db, SESSIONS_COLLECTION_PATH, userId, 'sessions');
-            const newDocRef = doc(userSessionsRef);
-            
-            // Generate a placeholder name
-            const placeholderName = `Chat ${sessions.length + 1}`; 
-
-            await setDoc(newDocRef, {
-                name: placeholderName,
-                createdAt: serverTimestamp(),
-            });
-
-            setCurrentSessionId(newDocRef.id);
-            if (window.innerWidth < 768) {
-                setIsSidebarOpen(false); // Close sidebar on mobile
-            }
-        } catch (e) {
-            console.error("Error creating new session:", e);
-            setErrorMessage("Failed to create a new session.");
-        }
-    }, [db, userId, sessions]);
 
     const deleteSession = async (sessionId) => {
         if (!db || !userId) return;
 
-        // Using a custom modal/confirmation dialog is recommended, but using window.confirm
-        // temporarily for simplicity in this single file.
+        // Use a custom UI component for confirmation instead of window.confirm
         if (!window.confirm("Are you sure you want to delete this chat session and all its messages?")) {
             return;
         }
@@ -560,25 +490,22 @@ export default function App() {
             
             const batch = writeBatch(db);
 
-            // 1. Delete all messages within the session (this requires finding them first)
             const messageDocs = await getDocs(messagesRef);
             messageDocs.forEach(msgDoc => {
                 batch.delete(msgDoc.ref);
             });
             
-            // 2. Delete the session document itself
             batch.delete(sessionDocRef);
 
             await batch.commit();
 
-            // After deletion, find a new session to switch to or create a new one
+            // Logic to switch to a new session after deletion
             if (currentSessionId === sessionId) {
                 const remainingSessions = sessions.filter(s => s.id !== sessionId);
                 if (remainingSessions.length > 0) {
                     setCurrentSessionId(remainingSessions[0].id);
                 } else {
                     setCurrentSessionId(null);
-                    // Use a slight delay to ensure the listener picks up the deletion before creation
                     setTimeout(() => createSession(), 100); 
                 }
             }
@@ -593,7 +520,6 @@ export default function App() {
     const handleSpeak = useCallback(async (text) => {
         if (!canSpeak || !text) return;
 
-        // Clear previous error message
         setErrorMessage(null);
 
         const audioUrl = await ttsApiCall(text, setErrorMessage);
@@ -602,99 +528,6 @@ export default function App() {
             audio.play();
         }
     }, [canSpeak]);
-
-    const handleSend = useCallback(async (transcript = null) => {
-        const textToSend = (transcript || input).trim();
-        if (isTyping || !textToSend || !currentSessionId) return;
-
-        setErrorMessage(null);
-        setIsTyping(true);
-        setInput("");
-
-        // 1. Save user message immediately
-        await saveMessage("user", textToSend);
-
-        // 2. Stream and accumulate bot response
-        let accumulatedBotText = "";
-        // Use the current messages state to construct history for the AI
-        const historyForAI = messages.map(msg => ({ sender: msg.sender, text: msg.text })); 
-        const stream = askAIStream(textToSend, historyForAI);
-
-        // Create a temporary message placeholder for streaming
-        const tempBotId = uuidv4();
-        setMessages(prev => [...prev, { id: tempBotId, sender: "bot", text: "" }]);
-
-        for await (const chunk of stream) {
-            accumulatedBotText += chunk;
-
-            // Update the temporary message with the streamed content
-            setMessages(prev => 
-                prev.map(msg => 
-                    msg.id === tempBotId ? { ...msg, text: accumulatedBotText } : msg
-                )
-            );
-
-            // Break if the stream returned an error
-            if (accumulatedBotText.includes("ERROR:")) break;
-        }
-
-        setIsTyping(false);
-
-        // 3. Persist the final bot message (and remove the temporary one)
-        if (!accumulatedBotText.includes("ERROR:")) {
-            // Find the session document reference
-            const sessionDocRef = doc(db, SESSIONS_COLLECTION_PATH, userId, 'sessions', currentSessionId);
-
-            // Update the session name with the first question if it's the first message
-            // Note: This check relies on the *local* messages array before the final message is saved.
-            if (messages.length === 0) {
-                const sessionName = textToSend.substring(0, 30) + (textToSend.length > 30 ? '...' : '');
-                await setDoc(sessionDocRef, { name: sessionName }, { merge: true });
-            }
-            
-            // Save final bot message
-            await saveMessage("bot", accumulatedBotText);
-
-            // The Firestore onSnapshot listener will handle the final state update, 
-            // removing the need to manually delete the temporary message here.
-            
-        } else {
-             // If error, keep the error message in the local state but do not persist it to Firestore
-             // The error message is already rendered via the streaming loop.
-        }
-
-    }, [input, isTyping, currentSessionId, db, userId, messages]);
-
-
-    const startListening = useCallback(() => {
-        if (isTyping || !recognitionRef.current) return;
-        
-        setErrorMessage(null);
-        
-        const recognitionInstance = recognitionRef.current;
-        
-        recognitionInstance.onresult = (event) => {
-            const transcript = event.results[0][0].transcript;
-            setInput(transcript);
-            recognitionInstance.stop(); // Manually stop after getting result
-            handleSend(transcript); // Auto-send the transcribed text
-        };
-
-        try {
-            recognitionInstance.start();
-            setIsListening(true);
-        } catch (e) {
-            // Error code 11 is typically "already started"
-            if (e.name !== 'InvalidStateError') { 
-                console.error("STT Start Error:", e);
-                setErrorMessage("Speech recognition failed to start. Browser support required.");
-                setIsListening(false);
-            }
-        }
-    }, [isTyping, handleSend]);
-
-
-    // --- Chat Logic ---
 
     const saveMessage = async (sender, text) => {
         if (!db || !userId || !currentSessionId || !text) return;
@@ -711,10 +544,92 @@ export default function App() {
             setErrorMessage("Failed to save message to database.");
         }
     };
+const handleSend = useCallback(async (transcript = null) => {
+    let textToSend = (transcript || input).trim();
+
+    if (!textToSend) return;
+
+    // Temporarily disable ONLY after validating text
+    setInput("");
+
+    // Do not block on isTyping — allow sending next prompt while model is thinking
+    // (This solves the “need to tap many times” bug)
+    if (isTyping) {
+        console.warn("Previous message still generating, sending anyway...");
+    }
+
+    setErrorMessage(null);
+    setIsTyping(true);
+
+    await saveMessage("user", textToSend);
+
+    let accumulatedBotText = "";
+    const historyForAI = messages.map(msg => ({ sender: msg.sender, text: msg.text }));
+    const stream = askAIStream(textToSend, historyForAI);
+
+    const tempBotId = uuidv4();
+    setMessages(prev => [...prev, { id: tempBotId, sender: "bot", text: "" }]);
+
+    try {
+        for await (const chunk of stream) {
+            accumulatedBotText += chunk;
+
+            setMessages(prev =>
+                prev.map(msg =>
+                    msg.id === tempBotId ? { ...msg, text: accumulatedBotText } : msg
+                )
+            );
+        }
+    } catch (err) {
+        console.error("Stream error:", err);
+        accumulatedBotText = "Sorry, an error occurred.";
+    }
+
+    setIsTyping(false);
+
+    const sessionDocRef = doc(db, SESSIONS_COLLECTION_PATH, userId, 'sessions', currentSessionId);
+
+    if (messages.length === 0) {
+        const sessionName = textToSend.substring(0, 30) + (textToSend.length > 30 ? "..." : "");
+        await setDoc(sessionDocRef, { name: sessionName }, { merge: true });
+    }
+
+    await saveMessage("bot", accumulatedBotText);
+
+}, [input, isTyping, currentSessionId, db, userId, messages]);
+
+
+
+    const startListening = useCallback(() => {
+        if (isTyping || !recognitionRef.current) return;
+        
+        setErrorMessage(null);
+        
+        const recognitionInstance = recognitionRef.current;
+        
+        // This is where we handle the result of the speech recognition
+        recognitionInstance.onresult = (event) => {
+            const transcript = event.results[0][0].transcript;
+            setInput(transcript);
+            recognitionInstance.stop(); 
+            // Call handleSend with the transcribed text
+            handleSend(transcript); 
+        };
+
+        try {
+            recognitionInstance.start();
+            setIsListening(true);
+        } catch (e) {
+            if (e.name !== 'InvalidStateError') { 
+                console.error("STT Start Error:", e);
+                setErrorMessage("Speech recognition failed to start. Browser support required.");
+                setIsListening(false);
+            }
+        }
+    }, [isTyping, handleSend, setInput, setIsListening]); 
 
 
     // --- Render Logic ---
-
     if (!isAuthReady) {
         return (
             <div className="flex justify-center items-center min-h-screen text-gray-600 bg-gray-100">
@@ -733,7 +648,6 @@ export default function App() {
                 onClick={() => setIsSidebarOpen(!isSidebarOpen)}
                 title="Toggle Sidebar"
             >
-                {/* Hamburger Icon */}
                 <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16m-7 6h7" />
                 </svg>
@@ -745,7 +659,7 @@ export default function App() {
                 Session: {sessions.find(s => s.id === currentSessionId)?.name || "New Chat"}
             </span>
             <div className="hidden md:block text-xs font-mono opacity-60 ml-4">
-                User ID: {userId.substring(0, 8)}...
+                App ID: {APP_ID.substring(0, 8)}...
             </div>
         </div>
     );
@@ -755,14 +669,12 @@ export default function App() {
         <div className="flex-1 flex flex-col min-w-0 bg-white">
             <Header />
 
-            {/* Error Message Display */}
             {errorMessage && (
                 <div className="p-3 bg-red-100 text-red-700 text-sm text-center font-medium border-l-4 border-red-500">
                     {errorMessage}
                 </div>
             )}
 
-            {/* Message Area */}
             <div className="flex-1 p-4 space-y-4 overflow-y-auto custom-scrollbar">
                 {messages.map((msg) => (
                     <div 
@@ -770,7 +682,6 @@ export default function App() {
                         className={`flex ${msg.sender === "user" ? "justify-end" : "justify-start"}`}
                     >
                         <div
-                            // Tailwind classes for speech bubbles
                             className={`max-w-xs md:max-w-md lg:max-w-lg p-3 rounded-xl shadow-md text-sm ${
                                 msg.sender === "user"
                                     ? "bg-blue-500 text-white rounded-br-none"
@@ -806,29 +717,34 @@ export default function App() {
                             : 'bg-gray-300 text-gray-700 hover:bg-gray-400'
                     }`}
                     onClick={startListening}
-                    disabled={isTyping}
+                    disabled={isTyping || !canSpeak} // Disable if STT/TTS not supported
                     title={isListening ? "Listening..." : "Start voice input (STT)"}
                 >
                     <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
-                        <path fillRule="evenodd" d="M7 4a3 3 0 016 0v4a3 3 0 11-6 0V4z" clipRule="evenodd" />
+                        <path d="M7 4a3 3 0 016 0v4a3 3 0 11-6 0V4z" />
                         <path d="M5.5 9.5a.5.5 0 011 0v4a.5.5 0 01-1 0v-4zM13.5 9.5a.5.5 0 011 0v4a.5.5 0 01-1 0v-4z" />
-                        <path fillRule="evenodd" d="M10 18a.75.75 0 01-.75-.75V15a.75.75 0 011.5 0v2.25A.75.75 0 0110 18zm6.5-6.5a.5.5 0 01-1 0v-4a.5.5 0 011 0v4zM3.5 11.5a.5.5 0 011 0v-4a.5.5 0 01-1 0v4z" clipRule="evenodd" />
-                        <path fillRule="evenodd" d="M5 9.75a.75.75 0 01.75-.75h8.5a.75.75 0 010 1.5H5.75A.75.75 0 015 9.75z" clipRule="evenodd" />
+                        <path d="M10 18a.75.75 0 01-.75-.75V15a.75.75 0 011.5 0v2.25A.75.75 0 0110 18zm6.5-6.5a.5.5 0 01-1 0v-4a.5.5 0 011 0v4zM3.5 11.5a.5.5 0 011 0v-4a.5.5 0 01-1 0v4z" />
+                        <path d="M5 9.75a.75.75 0 01.75-.75h8.5a.75.75 0 010 1.5H5.75A.75.75 0 015 9.75z" />
                         <path d="M15 11a1 1 0 011 1v2a4 4 0 01-8 0v-2a1 1 0 011-1h6z" />
                     </svg>
                 </button>
 
                 {/* Text Input */}
-                <input
-                    type="text"
-                    value={input}
-                    onChange={(e) => setInput(e.target.value)}
-                    onKeyDown={(e) => e.key === "Enter" && handleSend()}
-                    placeholder="Ask Mene anything..."
-                    disabled={isTyping}
-                    className="flex-1 p-3 border border-gray-300 rounded-full focus:outline-none focus:ring-2 focus:ring-green-500 transition duration-150"
-                />
-                
+                    <input
+            type="text"
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => {
+                if (e.key === "Enter" || e.keyCode === 13) {
+                    e.preventDefault();
+                    handleSend();
+                }
+            }}
+            placeholder="Ask Mene anything..."
+            className="flex-1 p-3 border border-gray-300 rounded-full focus:outline-none focus:ring-2 focus:ring-green-500"
+            />
+
+
                 {/* TTS Button */}
                 <button 
                     className={`p-3 rounded-full transition duration-150 shadow-md ${
@@ -841,7 +757,7 @@ export default function App() {
                     title="Read last bot message aloud (TTS)"
                 >
                     <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
-                        <path fillRule="evenodd" d="M9.383 3.003c.125-.466.52-.803.955-.803h.305c.435 0 .83.337.955.803l.36 1.353a1.5 1.5 0 001.037.989l.254.053c1.685.356 2.5 1.776 2.5 3.328v2.96c0 1.552-.815 2.972-2.5 3.328l-.254.053a1.5 1.5 0 00-1.037.989l-.36 1.353c-.125.466-.52.803-.955.803h-.305c-.435 0-.83-.337-.955-.803l-.36-1.353a1.5 1.5 0 00-1.037-.989l-.254-.053c-1.685-.356-2.5-1.776-2.5-3.328v-2.96c0-1.552.815-2.972 2.5-3.328l.254-.053a1.5 1.5 0 001.037-.989l.36-1.353zM10 7a1 1 0 100 2 1 1 0 000-2zm0 4a1 1 0 100 2 1 1 0 000-2z" clipRule="evenodd" />
+                        <path d="M9.383 3.003c.125-.466.52-.803.955-.803h.305c.435 0 .83.337.955.803l.36 1.353a1.5 1.5 0 001.037.989l.254.053c1.685.356 2.5 1.776 2.5 3.328v2.96c0 1.552-.815 2.972-2.5 3.328l-.254.053a1.5 1.5 0 00-1.037.989l-.36 1.353c-.125.466-.52.803-.955.803h-.305c-.435 0-.83-.337-.955.803l-.36-1.353a1.5 1.5 0 00-1.037-.989l-.254-.053c-1.685-.356-2.5-1.776-2.5-3.328v-2.96c0-1.552.815-2.972 2.5-3.328l.254-.053a1.5 1.5 0 001.037-.989l.36-1.353zM10 7a1 1 0 100 2 1 1 0 000-2zm0 4a1 1 0 100 2 1 1 0 000-2z" />
                     </svg>
                 </button>
 
@@ -866,23 +782,26 @@ export default function App() {
 
     // Final Application Layout (Desktop/Mobile Responsive)
     return (
-        <div className="flex flex-col items-center justify-center min-h-screen bg-gray-100 p-0 md:p-4 font-inter">
-            <style jsx="true">{`
-                /* Custom scrollbar for message area */
-                .custom-scrollbar::-webkit-scrollbar {
-                    width: 8px;
-                }
-                .custom-scrollbar::-webkit-scrollbar-track {
-                    background: #f1f1f1;
-                }
-                .custom-scrollbar::-webkit-scrollbar-thumb {
-                    background: #ccc;
-                    border-radius: 10px;
-                }
-                .custom-scrollbar::-webkit-scrollbar-thumb:hover {
-                    background: #999;
-                }
-            `}</style>
+        <div className="flex flex-col min-h-screen w-full bg-gray-100 font-inter">
+
+            {/* Tailwind CSS Script for Inter Font and General Styling */}
+            <script src="https://cdn.tailwindcss.com"></script>
+            <style>
+                            {`
+                            html, body, #root {
+                height: 100%;
+                margin: 0;
+                padding: 0;
+            }
+
+                    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+                    body { font-family: 'Inter', sans-serif; }
+                    .custom-scrollbar::-webkit-scrollbar { width: 8px; }
+                    .custom-scrollbar::-webkit-scrollbar-track { background: #f1f1f1; }
+                    .custom-scrollbar::-webkit-scrollbar-thumb { background: #ccc; border-radius: 10px; }
+                    .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #999; }
+                `}
+            </style>
             
             <div className="w-full h-screen md:w-full md:max-w-6xl md:h-[90vh] flex bg-white md:rounded-xl shadow-2xl overflow-hidden transition-all duration-300">
                 
@@ -898,7 +817,6 @@ export default function App() {
                         deleteSession={deleteSession}
                         userId={userId}
                     />
-                    {/* Overlay for mobile view */}
                     {isSidebarOpen && window.innerWidth < 768 && (
                         <div 
                             className="absolute inset-0 bg-black opacity-50 md:hidden z-30" 

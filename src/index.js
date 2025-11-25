@@ -1,9 +1,10 @@
 import React from "react";
-import ReactDOM from "react-dom/client"; // Use modern ReactDOM client
-import App from "../App.jsx";
+import { createRoot } from "react-dom/client"; 
+import App from "./App.jsx"; 
 
-// Standard entry point to render the App component into the HTML DOM.
-const root = ReactDOM.createRoot(document.getElementById("root"));
+// Use the modern createRoot API
+const container = document.getElementById("root");
+const root = createRoot(container);
 root.render(
   <React.StrictMode>
     <App />
