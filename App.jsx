@@ -31,82 +31,104 @@ import {
 
 
 // --- ENVIRONMENT VARIABLE HANDLING ---
+// Variables injected by the Canvas environment for secure setup.
 const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
 const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
 const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
 
-// --- API and TTS Helper Functions ---
+// --- API and TTS/STT Helper Functions ---
 
+// 1. API Key Getter
 const getApiKey = () => {
-    // 1. Check for the secure, environment-provided key first
+    // Check for the secure, environment-provided key first
     if (typeof __api_key !== 'undefined') { 
         return __api_key; 
     }
-    // 2. Use the key provided by the user as a fallback
-    return 'AIzaSyD0fDB4XPYTSONxvbLTUCLznwzLWWV11ys'; 
+    // Fallback: Use an empty string if running locally without the Canvas environment.
+    return ''; 
 };
 
 const GEMINI_API_KEY = getApiKey();
 const MODEL_NAME = 'gemini-2.5-flash-preview-09-2025';
-const TTS_MODEL = "gemini-2.5-flash-preview-tts";
+const API_ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL_NAME}:generateContent?key=${GEMINI_API_KEY}`;
+const TTS_API_ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${GEMINI_API_KEY}`;
 
-const withExponentialBackoff = async (fn, maxRetries = 5) => {
-    for (let attempt = 0; attempt < maxRetries; attempt++) {
-        try {
-            return await fn();
-        } catch (error) {
-            if (attempt === maxRetries - 1 || !(error.message.includes('429') || error.message.includes('500') || error.message.includes('Failed to fetch'))) {
-                throw error;
-            }
-            const delay = Math.pow(2, attempt) * 1000 + Math.random() * 1000;
-            await new Promise(resolve => setTimeout(resolve, delay));
-        }
-    }
-};
 
-function askAIStream(chatHistory, systemInstruction) {
+// 2. Gemini Stream Simulation
+/**
+ * Creates an Async Iterator that handles the AI request and simulates a stream.
+ */
+export function askAIStream(inputText, chatHistory) {
     let fullResponse = null;
     let chunks = [];
     let chunkIndex = 0;
-    const API_ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL_NAME}:generateContent?key=${GEMINI_API_KEY}`;
 
+    const historyForAPI = chatHistory.map(msg => ({
+        role: msg.sender === 'user' ? 'user' : 'model',
+        parts: [{ text: msg.text }],
+    }));
+
+    // Manually implements the async iterator protocol
     return {
         async next() {
             try {
+                // First call: make the REST API request
                 if (fullResponse === null) {
-                    const fetchContent = async () => {
-                        const response = await fetch(API_ENDPOINT, {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({
-                                contents: chatHistory,
-                                systemInstruction: { parts: [{ text: systemInstruction }] },
-                                tools: [{ google_search: {} }] 
-                            })
-                        });
-                        if (!response.ok) {
-                            const errorDetails = await response.json().catch(() => ({ error: { message: "Unknown error format" } }));
-                            throw new Error(`${response.status} ${response.statusText}: ${errorDetails.error.message}`); 
-                        }
-                        const data = await response.json();
-                        fullResponse = data.candidates?.[0]?.content?.parts?.[0]?.text || "No response received from AI.";
-                        chunks = fullResponse.split(/(\s+)/).filter(c => c.length > 0); 
+                    const payload = {
+                        contents: [...historyForAPI, { role: 'user', parts: [{ text: inputText }] }],
+                        systemInstruction: { parts: [{ text: "You are Mene, a helpful and friendly AI assistant. Keep your responses concise." }] },
                     };
-                    await withExponentialBackoff(fetchContent);
+
+                    const response = await fetch(API_ENDPOINT, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+
+                    if (!response.ok) {
+                        const errorDetails = await response.json();
+                        throw new Error(`${response.status} ${response.statusText}: ${errorDetails.error?.message || 'Unknown API Error'}`); 
+                    }
+                    
+                    const data = await response.json();
+                    
+                    // Extract the text from the API's response structure
+                    fullResponse = data.candidates?.[0]?.content?.parts?.[0]?.text || "No response received from AI.";
+                    
+                    // Split the full response to simulate the streaming effect
+                    // Splits by word and preserves spaces for better visual flow
+                    chunks = fullResponse.split(/(\s+)/).filter(c => c.length > 0); 
                 }
-                if (chunkIndex >= chunks.length) { return { done: true }; }
+
+                // Subsequent calls: Stream out the chunks one by one
+                if (chunkIndex >= chunks.length) {
+                    return { done: true, value: fullResponse }; // Return full response on finish
+                }
+
+                // Small delay to simulate streaming visually
                 await new Promise((r) => setTimeout(r, 20));
+
                 const chunk = chunks[chunkIndex++];
                 return { value: chunk, done: false };
+
             } catch (error) {
                 console.error("Gemini API Error:", error);
+                // Return a user-friendly error message
                 return { value: `ERROR: Failed to connect to AI. Details: ${error.message}`, done: true };
             }
         },
-        [Symbol.asyncIterator]() { return this; }
+        [Symbol.asyncIterator]() {
+            return this;
+        }
     };
 }
 
+
+// 3. TTS Utility Functions
+
+/**
+ * Converts a base64 string to an ArrayBuffer.
+ */
 const base64ToArrayBuffer = (base64) => {
     const binaryString = atob(base64);
     const len = binaryString.length;
@@ -117,580 +139,656 @@ const base64ToArrayBuffer = (base64) => {
     return bytes.buffer;
 };
 
+/**
+ * Converts PCM (raw audio data) to a standard WAV format Blob.
+ * @param {Int16Array} pcm16 - 16-bit PCM audio data.
+ * @param {number} sampleRate - Sample rate of the audio (e.g., 24000).
+ * @returns {Blob} - A Blob containing the WAV file data.
+ */
 const pcmToWav = (pcm16, sampleRate) => {
     const numChannels = 1;
     const numSamples = pcm16.length;
-    const buffer = new ArrayBuffer(44 + numSamples * 2);
+    const byteRate = sampleRate * numChannels * 2; // 2 bytes per sample (16 bit)
+    const blockAlign = numChannels * 2;
+
+    const buffer = new ArrayBuffer(44 + pcm16.byteLength);
     const view = new DataView(buffer);
-    view.setUint32(0, 0x52494646, false); 
-    view.setUint32(4, 36 + numSamples * 2, true);
-    view.setUint32(8, 0x57415645, false);
-    view.setUint32(12, 0x666d7420, false); 
+
+    // RIFF identifier 'RIFF'
+    writeString(view, 0, 'RIFF');
+    // RIFF chunk length
+    view.setUint32(4, 36 + pcm16.byteLength, true);
+    // WAVE identifier 'WAVE'
+    writeString(view, 8, 'WAVE');
+    // format chunk identifier 'fmt '
+    writeString(view, 12, 'fmt ');
+    // format chunk length 
     view.setUint32(16, 16, true);
-    view.setUint16(20, 1, true); 
+    // sample format (1 for PCM)
+    view.setUint16(20, 1, true);
+    // number of channels
     view.setUint16(22, numChannels, true);
+    // sample rate
     view.setUint32(24, sampleRate, true);
-    view.setUint32(28, sampleRate * 2, true);
-    view.setUint16(32, numChannels * 2, true);
+    // byte rate
+    view.setUint32(28, byteRate, true);
+    // block align
+    view.setUint16(32, blockAlign, true);
+    // bits per sample
     view.setUint16(34, 16, true);
-    view.setUint32(36, 0x64617461, false);
-    view.setUint32(40, numSamples * 2, true);
-    for (let i = 0; i < numSamples; i++) {
-        view.setInt16(44 + i * 2, pcm16[i], true);
-    }
-    return new Blob([view], { type: 'audio/wav' });
+    // data chunk identifier 'data'
+    writeString(view, 36, 'data');
+    // data chunk length
+    view.setUint32(40, pcm16.byteLength, true);
+
+    // PCM data
+    const pcmView = new Int16Array(buffer, 44);
+    pcmView.set(pcm16);
+
+    return new Blob([buffer], { type: 'audio/wav' });
 };
 
-let audioContext = null;
-let audioSource = null;
+/**
+ * Writes a string to a DataView at a specified offset.
+ */
+const writeString = (view, offset, string) => {
+    for (let i = 0; i < string.length; i++) {
+        view.setUint8(offset + i, string.charCodeAt(i));
+    }
+};
 
-const fetchTtsAudio = async (text) => {
-    const TTS_ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${TTS_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
-    
-    const payload = {
-        contents: [{ parts: [{ text: text }] }],
-        generationConfig: {
-            responseModalities: ["AUDIO"],
-            speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: "Charon" } } }
-        },
-        model: TTS_MODEL
-    };
+/**
+ * Makes the TTS API call and returns an Audio URL.
+ */
+const ttsApiCall = async (text, setErrorMessage) => {
+    if (!text) return null;
 
-    const fetchTts = async () => {
-        const response = await fetch(TTS_ENDPOINT, {
+    try {
+        const payload = {
+            contents: [{ parts: [{ text: text }] }],
+            generationConfig: {
+                responseModalities: ["AUDIO"],
+                speechConfig: {
+                    voiceConfig: {
+                        // Using a clear, friendly voice
+                        prebuiltVoiceConfig: { voiceName: "Achird" } 
+                    }
+                }
+            }
+        };
+
+        const response = await fetch(TTS_API_ENDPOINT, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload)
         });
+
         if (!response.ok) {
-            throw new Error(`TTS API failed: ${response.status} ${response.statusText}`);
+            throw new Error(`TTS API failed with status ${response.status}`);
         }
+
         const result = await response.json();
         const part = result?.candidates?.[0]?.content?.parts?.[0];
         const audioData = part?.inlineData?.data;
         const mimeType = part?.inlineData?.mimeType;
 
         if (audioData && mimeType && mimeType.startsWith("audio/L16")) {
+            // Extract sample rate from mimeType, e.g., audio/L16;rate=24000
             const rateMatch = mimeType.match(/rate=(\d+)/);
-            const sampleRate = rateMatch ? parseInt(rateMatch[1], 10) : 24000;
+            const sampleRate = rateMatch ? parseInt(rateMatch[1], 10) : 24000; 
+
             const pcmData = base64ToArrayBuffer(audioData);
             const pcm16 = new Int16Array(pcmData);
             const wavBlob = pcmToWav(pcm16, sampleRate);
             return URL.createObjectURL(wavBlob);
+        } else {
+            setErrorMessage("TTS Error: Could not generate valid audio data.");
+            return null;
         }
-        throw new Error("Invalid TTS response format.");
-    };
 
-    return withExponentialBackoff(fetchTts);
+    } catch (error) {
+        console.error("TTS Fetch Error:", error);
+        setErrorMessage(`TTS Generation failed: ${error.message}`);
+        return null;
+    }
 };
 
 
-// --- SESSION MANAGEMENT COMPONENT (Sidebar) ---
+// 4. Speech Recognition (STT) Utility
+let recognition = null;
+const setupRecognition = (onResult) => {
+    // Check for browser compatibility (webkitSpeechRecognition is the most common implementation)
+    if ('webkitSpeechRecognition' in window) {
+        // We must use `window.webkitSpeechRecognition` as standard `SpeechRecognition` might not be available
+        recognition = new window.webkitSpeechRecognition(); 
+        recognition.continuous = false;
+        recognition.interimResults = false;
+        recognition.lang = 'en-US';
 
-const Sidebar = ({ sessions, currentSessionId, switchSession, createNewSession, deleteSession }) => (
-    <div className="w-full md:w-64 bg-gray-900 text-white flex-shrink-0 flex flex-col p-4 shadow-xl">
-        <div className="flex justify-between items-center mb-4">
-            <h2 className="text-xl font-bold text-emerald-400">Conversations</h2>
-            <button
-                onClick={() => createNewSession(null)}
-                className="p-2 bg-emerald-600 rounded-lg shadow-md hover:bg-emerald-500 transition-colors flex items-center text-sm font-medium"
-                title="Start a New Chat"
-            >
-                <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-                </svg>
-                New Chat
-            </button>
-        </div>
-        
-        <div className="space-y-2 overflow-y-auto flex-1 pr-2">
-            {sessions.map((session) => (
-                <div 
-                    key={session.id} 
-                    className={`flex items-center justify-between p-3 rounded-lg cursor-pointer transition-colors ${
-                        session.id === currentSessionId ? "bg-emerald-700/80 ring-2 ring-emerald-500" : "bg-gray-800 hover:bg-gray-700"
-                    }`}
+        recognition.onresult = (event) => {
+            const transcript = event.results[0][0].transcript;
+            onResult(transcript);
+        };
+
+        recognition.onerror = (event) => {
+            console.error('Speech recognition error:', event.error);
+        };
+
+        recognition.onend = () => {
+            console.log('Speech recognition ended.');
+            setIsListening(false); // Make sure to update state on end/error
+        };
+
+        return true;
+    }
+    return false;
+};
+
+
+// 5. Common Collection Paths
+const SESSIONS_COLLECTION_PATH = `/artifacts/${appId}/users`;
+const MESSAGES_COLLECTION_PATH = (userId, sessionId) => 
+    `/artifacts/${appId}/users/${userId}/sessions/${sessionId}/messages`;
+
+
+// --- UI Components (Defined locally for single-file mandate) ---
+
+const Sidebar = React.memo(({ sessions, currentSessionId, switchSession, createNewSession, deleteSession, userId }) => {
+    return (
+        <div className="w-full md:w-64 bg-gray-50 border-r border-gray-200 p-4 flex flex-col transition-all duration-300">
+            <h2 className="text-xl font-bold text-gray-800 mb-4 flex items-center justify-between">
+                Conversations
+                <button
+                    onClick={createNewSession}
+                    className="p-2 bg-green-500 text-white rounded-full hover:bg-green-600 transition duration-150 shadow-md"
+                    title="New Chat"
                 >
-                    <span 
-                        className="truncate text-sm font-medium flex-1"
+                    +
+                </button>
+            </h2>
+
+            <div className="flex-1 overflow-y-auto space-y-2">
+                {sessions.map((session) => (
+                    <div
+                        key={session.id}
+                        className={`flex items-center justify-between p-3 rounded-lg cursor-pointer transition duration-150 ${session.id === currentSessionId ? 'bg-green-100 text-green-700 font-semibold' : 'bg-white text-gray-700 hover:bg-gray-100'}`}
                         onClick={() => switchSession(session.id)}
-                        title={session.title}
                     >
-                        {session.title}
-                    </span>
-                    <button
-                        onClick={(e) => { e.stopPropagation(); deleteSession(session.id); }}
-                        className="ml-2 text-gray-400 hover:text-red-400 p-1 rounded-full transition-colors"
-                        title="Delete Chat"
-                    >
-                        <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                        </svg>
-                    </button>
-                </div>
-            ))}
+                        <span className="truncate flex-1">{session.name || "New Chat"}</span>
+                        <button
+                            onClick={(e) => { e.stopPropagation(); deleteSession(session.id); }}
+                            className="text-red-500 p-1 hover:text-red-700 rounded-full transition duration-150 ml-2"
+                            title="Delete Chat"
+                        >
+                            <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                                <path fillRule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm4 0a1 1 0 100 2v6a1 1 0 100-2V8z" clipRule="evenodd" />
+                            </svg>
+                        </button>
+                    </div>
+                ))}
+            </div>
+            <div className="mt-4 pt-4 border-t border-gray-200 text-sm text-gray-500">
+                User ID: <span className="font-mono text-xs">{userId ? `${userId.substring(0, 8)}...` : "N/A"}</span>
+            </div>
         </div>
-        {!sessions.length && <p className="text-gray-500 text-center text-sm mt-4">No chats yet. Start a new one!</p>}
-    </div>
-);
+    );
+});
 
 
-// --- MAIN APP COMPONENT ---
+// --- Main App Component ---
 
 export default function App() {
+    // --- Firebase State ---
+    const [db, setDb] = useState(null);
+    const [auth, setAuth] = useState(null);
+    const [userId, setUserId] = useState(null);
+    const [isAuthReady, setIsAuthReady] = useState(false);
     const [sessions, setSessions] = useState([]);
     const [currentSessionId, setCurrentSessionId] = useState(null);
+
+    // --- Chat State ---
     const [messages, setMessages] = useState([]);
     const [input, setInput] = useState("");
     const [isTyping, setIsTyping] = useState(false);
-    const [isAuthReady, setIsAuthReady] = useState(false);
-    const [userId, setUserId] = useState(null);
-    const [db, setDb] = useState(null);
-    const [auth, setAuth] = useState(null);
-    const [error, setError] = useState(null);
+    const [errorMessage, setErrorMessage] = useState(null);
     const messageEndRef = useRef(null);
+    const [isSidebarOpen, setIsSidebarOpen] = useState(window.innerWidth >= 768); // Open by default on desktop
+
+    // --- TTS/STT State ---
     const [canSpeak, setCanSpeak] = useState(false);
-    const [isSidebarOpen, setIsSidebarOpen] = useState(window.innerWidth >= 768);
-    
-    const lastBotMessage = messages.slice().reverse().find(msg => msg.sender === 'bot');
+    const [isListening, setIsListening] = useState(false);
+    const [lastBotMessage, setLastBotMessage] = useState(null);
+    const recognitionRef = useRef(null); // Ref for speech recognition instance
 
-    const SYSTEM_INSTRUCTION = "You are Mene Bot, an expert, cheerful, and helpful AI assistant. Keep your responses concise and highly informative. Use Google Search grounding for up-to-date facts when necessary.";
+    // --- Effects ---
 
-    // Helper for getting collection path based on user ID
-    const getBasePath = useCallback((uid) => `/artifacts/${appId}/users/${uid}`, []);
-
-    // --- Firebase Initialization and Auth ---
+    // 1. Initialize Firebase and Authentication
     useEffect(() => {
-        if (!firebaseConfig) {
-            setError("Firebase configuration is missing.");
+        if (firebaseConfig) {
+            try {
+                const app = initializeApp(firebaseConfig);
+                const firestore = getFirestore(app);
+                const authentication = getAuth(app);
+
+                // Enable debug logging for better development visibility
+                setLogLevel('debug'); 
+                setDb(firestore);
+                setAuth(authentication);
+
+                const unsubscribeAuth = onAuthStateChanged(authentication, async (user) => {
+                    if (!user) {
+                        console.log("No user signed in. Attempting sign-in...");
+                        try {
+                            // If custom token is available, use it; otherwise, sign in anonymously
+                            if (initialAuthToken) {
+                                await signInWithCustomToken(authentication, initialAuthToken);
+                            } else {
+                                await signInAnonymously(authentication);
+                            }
+                        } catch (e) {
+                            console.error("Firebase Auth Error:", e);
+                            setErrorMessage("Failed to authenticate with Firebase.");
+                        }
+                    }
+                    // Auth state has stabilized, user is set (anonymous or custom token)
+                    setUserId(authentication.currentUser?.uid || crypto.randomUUID());
+                    setIsAuthReady(true);
+                });
+
+                return () => unsubscribeAuth();
+            } catch (e) {
+                console.error("Firebase Init Error:", e);
+                setErrorMessage("Failed to initialize Firebase services.");
+            }
+        }
+    }, [firebaseConfig, initialAuthToken]);
+
+
+    // 2. Setup Sessions Listener
+    useEffect(() => {
+        if (!isAuthReady || !db || !userId) return;
+
+        const userSessionsRef = collection(db, SESSIONS_COLLECTION_PATH, userId, 'sessions');
+        const q = query(userSessionsRef, orderBy('createdAt', 'desc'));
+
+        const unsubscribe = onSnapshot(q, (snapshot) => {
+            const loadedSessions = snapshot.docs.map(doc => ({
+                id: doc.id,
+                ...doc.data()
+            }));
+
+            setSessions(loadedSessions);
+
+            // If no sessions exist, create a new one automatically
+            if (loadedSessions.length === 0) {
+                // Use a timeout to ensure state updates happen after listener setup
+                setTimeout(() => createSession(userId), 0);
+            } else if (!currentSessionId || !loadedSessions.find(s => s.id === currentSessionId)) {
+                // Set to the most recent session if current one is invalid or deleted
+                setCurrentSessionId(loadedSessions[0].id);
+            }
+        }, (error) => {
+            console.error("Firestore Sessions Error:", error);
+            setErrorMessage("Failed to fetch chat sessions.");
+        });
+
+        return () => unsubscribe();
+    }, [isAuthReady, db, userId, currentSessionId]); // Dependency on currentSessionId is required to re-evaluate logic when it changes
+
+    
+    // 3. Setup Messages Listener (Current Session)
+    useEffect(() => {
+        if (!isAuthReady || !db || !userId || !currentSessionId) {
+            setMessages([]); // Clear messages if no session is selected
             return;
         }
-        try {
-            setLogLevel('debug');
-            const app = initializeApp(firebaseConfig);
-            const firestore = getFirestore(app);
-            const firebaseAuth = getAuth(app);
-            setDb(firestore);
-            setAuth(firebaseAuth);
 
-            onAuthStateChanged(firebaseAuth, async (user) => {
-                if (!user) {
-                    if (initialAuthToken) {
-                        try {
-                            await signInWithCustomToken(firebaseAuth, initialAuthToken);
-                        } catch (e) {
-                            console.error("Custom token sign-in failed, signing in anonymously:", e);
-                            await signInAnonymously(firebaseAuth);
-                        }
-                    } else {
-                        await signInAnonymously(firebaseAuth);
-                    }
-                }
-                
-                // IMPORTANT FIX: Set userId strictly based on the authenticated user.
-                const currentUser = firebaseAuth.currentUser;
-                if (currentUser) {
-                    setUserId(currentUser.uid);
-                    setIsAuthReady(true);
-                } else {
-                    setUserId(null);
-                    setIsAuthReady(true); // Still ready, but anonymous or failed sign-in
-                }
+        const messagesRef = collection(db, MESSAGES_COLLECTION_PATH(userId, currentSessionId));
+        // Query last 50 messages, ordered by time
+        const q = query(messagesRef, orderBy('createdAt', 'asc'), limit(50));
+
+        const unsubscribe = onSnapshot(q, (snapshot) => {
+            const loadedMessages = snapshot.docs.map(doc => {
+                const data = doc.data();
+                return {
+                    id: doc.id,
+                    sender: data.sender,
+                    text: data.text,
+                    // Handle Firestore Timestamp conversion
+                    createdAt: data.createdAt?.toDate ? data.createdAt.toDate() : new Date(),
+                };
             });
-        } catch (e) {
-            console.error("Firebase initialization failed:", e);
-            setError(`Firebase initialization failed: ${e.message}`);
+            setMessages(loadedMessages);
+
+            // Track the last bot message for the TTS button
+            const lastBot = loadedMessages.slice().reverse().find(msg => msg.sender === 'bot');
+            setLastBotMessage(lastBot);
+
+        }, (error) => {
+            console.error("Firestore Messages Error:", error);
+            setErrorMessage("Failed to fetch chat messages.");
+        });
+
+        return () => unsubscribe();
+    }, [isAuthReady, db, userId, currentSessionId]);
+
+
+    // 4. Scroll to bottom on new messages/typing
+    useEffect(() => {
+        messageEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    }, [messages, isTyping]);
+
+
+    // 5. Check for TTS/STT capability and setup STT
+    useEffect(() => {
+        if ('speechSynthesis' in window && 'webkitSpeechRecognition' in window) {
+            setCanSpeak(true);
+        }
+
+        // Setup the recognition object
+        if ('webkitSpeechRecognition' in window) {
+            const recognitionInstance = new window.webkitSpeechRecognition();
+            recognitionInstance.continuous = false;
+            recognitionInstance.interimResults = false;
+            recognitionInstance.lang = 'en-US';
+            
+            recognitionInstance.onend = () => setIsListening(false);
+            recognitionInstance.onerror = (event) => {
+                console.error('Speech recognition error:', event.error);
+                setErrorMessage(`Speech recognition error: ${event.error}`);
+                setIsListening(false);
+            };
+
+            recognitionRef.current = recognitionInstance;
+        }
+
+        // Cleanup on unmount
+        return () => {
+            if (recognitionRef.current) {
+                recognitionRef.current.stop();
+                recognitionRef.current = null;
+            }
+        };
+    }, []);
+
+    // --- Firebase Actions ---
+
+    const switchSession = useCallback((sessionId) => {
+        setCurrentSessionId(sessionId);
+        if (window.innerWidth < 768) {
+            setIsSidebarOpen(false); // Close sidebar on mobile after selection
         }
     }, []);
 
-    // --- Message Saving Function (moved inside App to access userId reliably) ---
-    const saveMessage = useCallback(async (sender, text, sessionId) => {
-        // Strict guard check for authentication completion
-        if (!db || !userId || !sessionId) {
-            console.error("Error saving message: Missing DB, UserID, or SessionID.");
-            throw new Error("Cannot save message: Authentication not complete or session missing.");
-        }
-        
-        const basePath = getBasePath(userId); // Uses the authenticated userId for the path
-        
+    const createSession = useCallback(async () => {
+        if (!db || !userId) return;
+
         try {
-            await addDoc(collection(db, basePath, 'messages'), {
-                sessionId,
-                sender,
-                text,
-                userId: userId, // Record the actual UID of the owner
-                timestamp: serverTimestamp()
-            });
-        } catch (e) {
-            console.error("Error saving message:", e);
-            throw new Error(`Could not save message to database: ${e.message}`);
-        }
-    }, [db, userId, getBasePath]);
+            const userSessionsRef = collection(db, SESSIONS_COLLECTION_PATH, userId, 'sessions');
+            const newDocRef = doc(userSessionsRef);
+            
+            // Generate a placeholder name
+            const placeholderName = `Chat ${sessions.length + 1}`; 
 
-
-    // --- SESSION MANAGEMENT FUNCTIONS (Wrapped in useCallback) ---
-
-    const createSession = useCallback(async (initialTitle = null) => {
-        if (!db || !userId) return; // Guard
-        const basePath = getBasePath(userId);
-        const sessionsRef = collection(db, basePath, 'sessions');
-        
-        try {
-            const newSession = {
-                title: initialTitle || ("New Chat " + new Date().toLocaleTimeString()),
+            await setDoc(newDocRef, {
+                name: placeholderName,
                 createdAt: serverTimestamp(),
-            };
-            const docRef = await addDoc(sessionsRef, newSession);
-            setCurrentSessionId(docRef.id);
+            });
+
+            setCurrentSessionId(newDocRef.id);
             if (window.innerWidth < 768) {
-                setIsSidebarOpen(false);
+                setIsSidebarOpen(false); // Close sidebar on mobile
             }
         } catch (e) {
-            console.error("Error creating session:", e);
-            setError(`Could not create new session: ${e.message}`);
+            console.error("Error creating new session:", e);
+            setErrorMessage("Failed to create a new session.");
         }
-    }, [db, userId, getBasePath]);
-    
-    const switchSession = (id) => {
-        setCurrentSessionId(id);
-        if (window.innerWidth < 768) {
-            setIsSidebarOpen(false);
-        }
-    };
+    }, [db, userId, sessions]);
 
-    const deleteSession = async (sessionIdToDelete) => {
-        if (!db || !userId) return; // Guard
-        const basePath = getBasePath(userId);
-        const sessionDocRef = doc(db, basePath, 'sessions', sessionIdToDelete);
-        const messagesRef = collection(db, basePath, 'messages');
-        
-        const batch = writeBatch(db);
+    const deleteSession = async (sessionId) => {
+        if (!db || !userId) return;
+
+        // Using a custom modal/confirmation dialog is recommended, but using window.confirm
+        // temporarily for simplicity in this single file.
+        if (!window.confirm("Are you sure you want to delete this chat session and all its messages?")) {
+            return;
+        }
 
         try {
-            const messagesQuery = query(messagesRef, where('sessionId', '==', sessionIdToDelete));
-            const messagesSnapshot = await withExponentialBackoff(() => getDocs(messagesQuery));
+            const sessionDocRef = doc(db, SESSIONS_COLLECTION_PATH, userId, 'sessions', sessionId);
+            const messagesRef = collection(db, MESSAGES_COLLECTION_PATH(userId, sessionId));
             
-            messagesSnapshot.forEach((msgDoc) => {
+            const batch = writeBatch(db);
+
+            // 1. Delete all messages within the session (this requires finding them first)
+            const messageDocs = await getDocs(messagesRef);
+            messageDocs.forEach(msgDoc => {
                 batch.delete(msgDoc.ref);
             });
             
+            // 2. Delete the session document itself
             batch.delete(sessionDocRef);
-            
+
             await batch.commit();
 
-            if (sessionIdToDelete === currentSessionId) {
-                const remainingSessions = sessions.filter(s => s.id !== sessionIdToDelete);
+            // After deletion, find a new session to switch to or create a new one
+            if (currentSessionId === sessionId) {
+                const remainingSessions = sessions.filter(s => s.id !== sessionId);
                 if (remainingSessions.length > 0) {
                     setCurrentSessionId(remainingSessions[0].id);
                 } else {
                     setCurrentSessionId(null);
-                    setMessages([]);
+                    // Use a slight delay to ensure the listener picks up the deletion before creation
+                    setTimeout(() => createSession(), 100); 
                 }
             }
         } catch (e) {
-            console.error("Error deleting session and messages:", e);
-            setError(`Could not delete session: ${e.message}`);
+            console.error("Error deleting session:", e);
+            setErrorMessage("Failed to delete the chat session.");
         }
     };
-
-
-    // --- Firestore Realtime Listeners ---
-
-    // Listener 1: Fetch Sessions
-    useEffect(() => {
-        if (!isAuthReady || !db || !userId) return; // Strict guard
-
-        const basePath = getBasePath(userId);
-        const q = query(collection(db, basePath, 'sessions'), orderBy('createdAt', 'desc'));
-
-        const unsubscribe = onSnapshot(q, (querySnapshot) => {
-            const fetchedSessions = [];
-            querySnapshot.forEach((doc) => {
-                const data = doc.data();
-                fetchedSessions.push({ 
-                    id: doc.id,
-                    title: data.title || `Chat ${doc.id.substring(0, 5)}`,
-                    createdAt: data.createdAt?.toDate ? data.createdAt.toDate() : new Date(),
-                });
-            });
-            setSessions(fetchedSessions);
-
-            // --- AUTO-START LOGIC ---
-            if (fetchedSessions.length > 0 && !currentSessionId) {
-                setCurrentSessionId(fetchedSessions[0].id);
-            } else if (fetchedSessions.length === 0 && userId) { // Check userId before trying to create
-                setTimeout(() => {
-                    if (userId && db) { 
-                         createSession('Auto-Start Chat'); 
-                    }
-                }, 100);
-            }
-
-        }, (err) => {
-            console.error("Firestore session subscription failed:", err);
-            setError(`Failed to load sessions: ${err.message}`);
-        });
-
-        return () => unsubscribe();
-    }, [isAuthReady, db, userId, currentSessionId, createSession, getBasePath]); 
-
-    // Listener 2: Fetch Messages for Current Session
-    useEffect(() => {
-        if (!isAuthReady || !db || !userId || !currentSessionId) {
-            setMessages([]);
-            return;
-        }
-
-        const basePath = getBasePath(userId);
-        
-        const q = query(
-            collection(db, basePath, 'messages'),
-            where('sessionId', '==', currentSessionId), 
-            limit(100)
-        );
-
-        const unsubscribe = onSnapshot(q, (querySnapshot) => {
-            let fetchedMessages = [];
-            querySnapshot.forEach((doc) => {
-                const data = doc.data();
-                fetchedMessages.push({ 
-                    id: doc.id,
-                    sender: data.sender || 'bot',
-                    text: data.text || '', 
-                    userId: data.userId,
-                    timestamp: data.timestamp?.toDate ? data.timestamp.toDate() : new Date(),
-                });
-            });
-            
-            // Client-side sorting by timestamp (ascending)
-            fetchedMessages.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
-
-            setMessages(fetchedMessages);
-        }, (err) => {
-            console.error("Firestore message subscription failed:", err);
-            setError(`Failed to load messages: ${err.message}`);
-        });
-
-        return () => unsubscribe();
-    }, [isAuthReady, db, userId, currentSessionId, getBasePath]);
-
-    // --- Auto Scroll & TTS Check ---
-    useEffect(() => {
-        if (messageEndRef.current) {
-            messageEndRef.current.scrollIntoView({ behavior: "smooth" });
-        }
-    }, [messages]);
-
-    useEffect(() => {
-        setCanSpeak(typeof window.AudioContext !== 'undefined' || typeof window.webkitAudioContext !== 'undefined');
-        if (!audioContext && canSpeak) {
-            audioContext = new (window.AudioContext || window.webkitAudioContext)();
-        }
-    }, [canSpeak]);
     
-    // --- Core Logic Functions ---
-    
+    // --- TTS/STT Handlers ---
+
     const handleSpeak = useCallback(async (text) => {
-        if (!canSpeak || !text || isTyping) return;
-        if (audioSource) { audioSource.stop(); audioSource = null; }
-        try {
-            const audioUrl = await fetchTtsAudio(text);
+        if (!canSpeak || !text) return;
+
+        // Clear previous error message
+        setErrorMessage(null);
+
+        const audioUrl = await ttsApiCall(text, setErrorMessage);
+        if (audioUrl) {
             const audio = new Audio(audioUrl);
             audio.play();
-            audio.onended = () => { URL.revokeObjectURL(audioUrl); };
-        } catch (e) {
-            console.error("TTS playback failed:", e);
-            setError(`TTS Error: ${e.message}`);
         }
-    }, [canSpeak, isTyping]);
+    }, [canSpeak]);
 
+    const handleSend = useCallback(async (transcript = null) => {
+        const textToSend = (transcript || input).trim();
+        if (isTyping || !textToSend || !currentSessionId) return;
 
-    const handleSend = async () => {
-        if (!input.trim() || isTyping || !userId || !currentSessionId) {
-            if (!currentSessionId) setError("Please start a new chat session first or wait for the auto-start.");
-            return;
-        }
-
-        const userInput = input;
-        setInput("");
+        setErrorMessage(null);
         setIsTyping(true);
-        setError(null);
-        
-        // 1. Get the current chat history for context
-        const chatHistoryForAPI = messages
-            .filter(msg => !msg.text.startsWith("ERROR")) 
-            .map(msg => ({ 
-                role: msg.sender === 'user' ? 'user' : 'model', 
-                parts: [{ text: msg.text }] 
-            }));
+        setInput("");
 
-        chatHistoryForAPI.push({ role: 'user', parts: [{ text: userInput }] });
-        
-        try {
-            // 2. Optimistically add the user message to Firestore
-            await saveMessage("user", userInput, currentSessionId);
-        } catch (e) {
-            setIsTyping(false);
-            setError(e.message);
-            return;
+        // 1. Save user message immediately
+        await saveMessage("user", textToSend);
+
+        // 2. Stream and accumulate bot response
+        let accumulatedBotText = "";
+        // Use the current messages state to construct history for the AI
+        const historyForAI = messages.map(msg => ({ sender: msg.sender, text: msg.text })); 
+        const stream = askAIStream(textToSend, historyForAI);
+
+        // Create a temporary message placeholder for streaming
+        const tempBotId = uuidv4();
+        setMessages(prev => [...prev, { id: tempBotId, sender: "bot", text: "" }]);
+
+        for await (const chunk of stream) {
+            accumulatedBotText += chunk;
+
+            // Update the temporary message with the streamed content
+            setMessages(prev => 
+                prev.map(msg => 
+                    msg.id === tempBotId ? { ...msg, text: accumulatedBotText } : msg
+                )
+            );
+
+            // Break if the stream returned an error
+            if (accumulatedBotText.includes("ERROR:")) break;
         }
 
-        // 3. Add a local placeholder message for streaming visualization
-        let botMessageId = uuidv4();
-        setMessages((prev) => [...prev, { id: botMessageId, sender: "bot", text: "", userId: 'bot-temp', timestamp: new Date(), sessionId: currentSessionId }]);
-        
-        let botText = "";
-        try {
-            const generator = askAIStream(chatHistoryForAPI, SYSTEM_INSTRUCTION);
-            let next = await generator.next();
-
-            while (!next.done) {
-                botText += next.value;
-                // Update the last message's text in the state to simulate streaming
-                setMessages((prev) => {
-                    const updated = [...prev];
-                    const lastIndex = updated.length - 1;
-                    if (updated[lastIndex]?.id === botMessageId) {
-                         updated[lastIndex].text = botText;
-                    }
-                    return updated;
-                });
-                next = await generator.next();
-            }
-
-            // 4. Save the final bot message to Firestore (using authenticated userId for path)
-            await saveMessage("bot", botText, currentSessionId);
-            
-            // 5. Update session title if it's the first message or if title is the generic auto-start title
-            const currentSession = sessions.find(s => s.id === currentSessionId);
-            if (db && userId && (!currentSession || currentSession.title.startsWith("Auto-Start Chat"))) {
-                const firstWords = userInput.split(/\s+/).slice(0, 5).join(" ") + "...";
-                const sessionDocRef = doc(db, getBasePath(userId), 'sessions', currentSessionId);
-                await withExponentialBackoff(() => setDoc(sessionDocRef, { title: firstWords }, { merge: true }));
-            }
-            
-        } catch (e) {
-            console.error("AI interaction failed:", e);
-            botText = `ERROR: Failed to get response from AI. Details: ${e.message}`;
-            setError(botText);
-            // Save the error message so it's persistent (still uses correct userId for path)
-            await saveMessage("bot", botText, currentSessionId);
-        }
-        
-        // 6. Cleanup: Remove the local placeholder.
-        setMessages(prev => prev.filter(msg => msg.id !== botMessageId));
         setIsTyping(false);
-    };
 
-    const startListening = () => {
-        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-        if (!SpeechRecognition) {
-            setError("Voice typing is not supported by your browser.");
-            return;
-        }
-        try {
-            const recognizer = new SpeechRecognition();
-            recognizer.lang = "en-US";
-            recognizer.continuous = false;
-            recognizer.interimResults = false;
+        // 3. Persist the final bot message (and remove the temporary one)
+        if (!accumulatedBotText.includes("ERROR:")) {
+            // Find the session document reference
+            const sessionDocRef = doc(db, SESSIONS_COLLECTION_PATH, userId, 'sessions', currentSessionId);
+
+            // Update the session name with the first question if it's the first message
+            // Note: This check relies on the *local* messages array before the final message is saved.
+            if (messages.length === 0) {
+                const sessionName = textToSend.substring(0, 30) + (textToSend.length > 30 ? '...' : '');
+                await setDoc(sessionDocRef, { name: sessionName }, { merge: true });
+            }
             
-            recognizer.onresult = (e) => {
-                const transcript = e.results[0][0].transcript;
-                setInput(transcript);
-            };
+            // Save final bot message
+            await saveMessage("bot", accumulatedBotText);
 
-            recognizer.onerror = (e) => {
-                 console.error("Speech recognition error:", e.error);
-                 setError(`Voice input error: ${e.error}`);
-            };
+            // The Firestore onSnapshot listener will handle the final state update, 
+            // removing the need to manually delete the temporary message here.
+            
+        } else {
+             // If error, keep the error message in the local state but do not persist it to Firestore
+             // The error message is already rendered via the streaming loop.
+        }
 
-            recognizer.onstart = () => { setError("Listening... Speak now."); };
-            recognizer.onend = () => { if (error === "Listening... Speak now.") setError(null); };
+    }, [input, isTyping, currentSessionId, db, userId, messages]);
 
-            recognizer.start();
+
+    const startListening = useCallback(() => {
+        if (isTyping || !recognitionRef.current) return;
+        
+        setErrorMessage(null);
+        
+        const recognitionInstance = recognitionRef.current;
+        
+        recognitionInstance.onresult = (event) => {
+            const transcript = event.results[0][0].transcript;
+            setInput(transcript);
+            recognitionInstance.stop(); // Manually stop after getting result
+            handleSend(transcript); // Auto-send the transcribed text
+        };
+
+        try {
+            recognitionInstance.start();
+            setIsListening(true);
         } catch (e) {
-            console.error("Failed to start speech recognition:", e);
-            setError(`Could not start voice input: ${e.message}`);
+            // Error code 11 is typically "already started"
+            if (e.name !== 'InvalidStateError') { 
+                console.error("STT Start Error:", e);
+                setErrorMessage("Speech recognition failed to start. Browser support required.");
+                setIsListening(false);
+            }
+        }
+    }, [isTyping, handleSend]);
+
+
+    // --- Chat Logic ---
+
+    const saveMessage = async (sender, text) => {
+        if (!db || !userId || !currentSessionId || !text) return;
+
+        try {
+            const messagesRef = collection(db, MESSAGES_COLLECTION_PATH(userId, currentSessionId));
+            await addDoc(messagesRef, {
+                sender: sender,
+                text: text,
+                createdAt: serverTimestamp(),
+            });
+        } catch (e) {
+            console.error("Error saving message:", e);
+            setErrorMessage("Failed to save message to database.");
         }
     };
 
 
-    // --- UI RENDER ---
-    const chatContent = (
-        <div className="flex-1 flex flex-col overflow-hidden">
-            {/* Header */}
-            <div className="bg-emerald-600 text-white p-4 flex justify-between items-center shadow-lg">
-                <div className="flex items-center">
-                    <button 
-                        className="md:hidden p-1 mr-2 rounded-md hover:bg-emerald-500 transition-colors"
-                        onClick={() => setIsSidebarOpen(!isSidebarOpen)}
-                        title="Toggle Conversations Menu"
-                    >
-                         <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h7" />
-                        </svg>
-                    </button>
-                    <h1 className="text-xl font-bold flex items-center">
-                        <span className="text-2xl mr-2">🤖</span> Mene Bot
-                    </h1>
+    // --- Render Logic ---
+
+    if (!isAuthReady) {
+        return (
+            <div className="flex justify-center items-center min-h-screen text-gray-600 bg-gray-100">
+                <div className="p-6 bg-white rounded-xl shadow-lg">
+                    <p>Loading application and authenticating...</p>
                 </div>
-                {isAuthReady ? (
-                    <div className="text-xs bg-emerald-700/70 py-1 px-3 rounded-full opacity-80 cursor-default truncate" title={`Current User ID: ${userId}`}>
-                        User: {userId ? `${userId.substring(0, 5)}...` : 'Anon'}
-                    </div>
-                ) : (
-                    <div className="text-xs bg-emerald-700/70 py-1 px-3 rounded-full">Connecting...</div>
-                )}
             </div>
+        );
+    }
+    
+    // Header component
+    const Header = () => (
+        <div className="p-4 bg-green-600 text-white shadow-md flex items-center justify-between">
+            <button 
+                className="md:hidden p-1 rounded-md hover:bg-green-700 transition"
+                onClick={() => setIsSidebarOpen(!isSidebarOpen)}
+                title="Toggle Sidebar"
+            >
+                {/* Hamburger Icon */}
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16m-7 6h7" />
+                </svg>
+            </button>
+            <h1 className="text-xl font-bold flex-1 text-center md:text-left">
+                Mene AI Chatbot
+            </h1>
+            <span className="hidden md:block text-sm opacity-80 bg-green-700 px-3 py-1 rounded-full">
+                Session: {sessions.find(s => s.id === currentSessionId)?.name || "New Chat"}
+            </span>
+            <div className="hidden md:block text-xs font-mono opacity-60 ml-4">
+                User ID: {userId.substring(0, 8)}...
+            </div>
+        </div>
+    );
+
+    // Main Chat Content
+    const chatContent = (
+        <div className="flex-1 flex flex-col min-w-0 bg-white">
+            <Header />
 
             {/* Error Message Display */}
-            {error && (
-                <p className="p-3 bg-red-100 text-red-700 border-l-4 border-red-500 text-sm font-medium transition-all duration-300">
-                    {error}
-                </p>
+            {errorMessage && (
+                <div className="p-3 bg-red-100 text-red-700 text-sm text-center font-medium border-l-4 border-red-500">
+                    {errorMessage}
+                </div>
             )}
 
-            {/* Messages Area */}
-            <div className="flex-1 p-4 overflow-y-auto bg-gray-50 space-y-4">
-                {!isAuthReady && (
-                    <div className="text-center text-gray-500 italic p-10">
-                        Establishing secure connection to Firebase and Gemini...
-                    </div>
-                )}
-                {!currentSessionId && isAuthReady && (
-                    <div className="text-center text-gray-500 p-10">
-                        {sessions.length === 0 
-                            ? "Starting your first chat... hold on a moment."
-                            : "Select a chat from the sidebar to continue."
-                        }
-                    </div>
-                )}
-                
+            {/* Message Area */}
+            <div className="flex-1 p-4 space-y-4 overflow-y-auto custom-scrollbar">
                 {messages.map((msg) => (
                     <div 
-                        key={msg.id || msg.timestamp.getTime()} 
+                        key={msg.id} 
                         className={`flex ${msg.sender === "user" ? "justify-end" : "justify-start"}`}
                     >
-                        <div 
-                            className={`max-w-[80%] p-3 rounded-xl shadow-md transition-all duration-200 ${
+                        <div
+                            // Tailwind classes for speech bubbles
+                            className={`max-w-xs md:max-w-md lg:max-w-lg p-3 rounded-xl shadow-md text-sm ${
                                 msg.sender === "user"
-                                    ? "bg-blue-600 text-white rounded-br-none"
-                                    : "bg-emerald-500 text-white rounded-tl-none"
-                            } ${msg.text.startsWith("ERROR") ? "bg-red-500/80" : ""}`}
+                                    ? "bg-blue-500 text-white rounded-br-none"
+                                    : "bg-gray-200 text-gray-800 rounded-tl-none"
+                            }`}
                             onClick={msg.sender === "bot" && canSpeak ? () => handleSpeak(msg.text) : null}
                             style={msg.sender === "bot" && canSpeak ? {cursor: 'pointer'} : {}}
                             title={msg.sender === "bot" && canSpeak ? "Click to hear this message" : null}
                         >
-                            <p className="text-xs opacity-70 mb-1">{msg.sender === 'bot' ? 'MeneBot' : msg.userId.substring(0, 8)}</p>
-                            <span className="whitespace-pre-wrap">{msg.text || "Message content unavailable"}</span>
+                            {msg.text}
                         </div>
                     </div>
                 ))}
 
                 {isTyping && (
                     <div className="flex justify-start">
-                        <div className="max-w-[80%] p-3 rounded-xl shadow-md bg-gray-300 text-gray-700 rounded-tl-none italic">
-                            Bot is generating...
+                        <div className="max-w-xs p-3 rounded-xl bg-gray-100 text-gray-500 italic text-sm shadow-sm">
+                            Mene is generating...
                         </div>
                     </div>
                 )}
@@ -699,70 +797,118 @@ export default function App() {
             </div>
 
             {/* Input Area */}
-            <div className="p-4 bg-white border-t border-gray-200 flex space-x-2 flex-shrink-0">
+            <div className="p-3 border-t border-gray-200 flex items-center space-x-2 bg-gray-50">
+                {/* STT Button */}
                 <button 
-                    className="p-3 rounded-full bg-indigo-500 text-white shadow-lg hover:bg-indigo-600 transition-colors disabled:bg-gray-400 disabled:cursor-not-allowed" 
+                    className={`p-3 rounded-full transition duration-150 shadow-md ${
+                        isListening 
+                            ? 'bg-red-500 text-white animate-pulse' 
+                            : 'bg-gray-300 text-gray-700 hover:bg-gray-400'
+                    }`}
                     onClick={startListening}
-                    disabled={isTyping || !isAuthReady || !currentSessionId}
-                    title="Start Voice Input"
+                    disabled={isTyping}
+                    title={isListening ? "Listening..." : "Start voice input (STT)"}
                 >
-                    🎤
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                        <path fillRule="evenodd" d="M7 4a3 3 0 016 0v4a3 3 0 11-6 0V4z" clipRule="evenodd" />
+                        <path d="M5.5 9.5a.5.5 0 011 0v4a.5.5 0 01-1 0v-4zM13.5 9.5a.5.5 0 011 0v4a.5.5 0 01-1 0v-4z" />
+                        <path fillRule="evenodd" d="M10 18a.75.75 0 01-.75-.75V15a.75.75 0 011.5 0v2.25A.75.75 0 0110 18zm6.5-6.5a.5.5 0 01-1 0v-4a.5.5 0 011 0v4zM3.5 11.5a.5.5 0 011 0v-4a.5.5 0 01-1 0v4z" clipRule="evenodd" />
+                        <path fillRule="evenodd" d="M5 9.75a.75.75 0 01.75-.75h8.5a.75.75 0 010 1.5H5.75A.75.75 0 015 9.75z" clipRule="evenodd" />
+                        <path d="M15 11a1 1 0 011 1v2a4 4 0 01-8 0v-2a1 1 0 011-1h6z" />
+                    </svg>
                 </button>
 
+                {/* Text Input */}
                 <input
                     type="text"
                     value={input}
                     onChange={(e) => setInput(e.target.value)}
                     onKeyDown={(e) => e.key === "Enter" && handleSend()}
-                    placeholder={currentSessionId ? "Ask Mene anything..." : "Start a new chat first..."}
-                    disabled={isTyping || !isAuthReady || !currentSessionId}
-                    className="flex-1 p-3 border border-gray-300 rounded-full focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 outline-none transition-all duration-200"
+                    placeholder="Ask Mene anything..."
+                    disabled={isTyping}
+                    className="flex-1 p-3 border border-gray-300 rounded-full focus:outline-none focus:ring-2 focus:ring-green-500 transition duration-150"
                 />
                 
+                {/* TTS Button */}
                 <button 
-                    className="p-3 rounded-full bg-emerald-500 text-white shadow-lg hover:bg-emerald-600 transition-colors disabled:bg-gray-400 disabled:cursor-not-allowed"
+                    className={`p-3 rounded-full transition duration-150 shadow-md ${
+                        canSpeak && !isTyping && lastBotMessage
+                            ? 'bg-green-500 text-white hover:bg-green-600'
+                            : 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                    }`}
                     onClick={() => handleSpeak(lastBotMessage?.text)}
                     disabled={isTyping || !canSpeak || !lastBotMessage}
-                    title="Read last bot message aloud"
+                    title="Read last bot message aloud (TTS)"
                 >
-                    🔊
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                        <path fillRule="evenodd" d="M9.383 3.003c.125-.466.52-.803.955-.803h.305c.435 0 .83.337.955.803l.36 1.353a1.5 1.5 0 001.037.989l.254.053c1.685.356 2.5 1.776 2.5 3.328v2.96c0 1.552-.815 2.972-2.5 3.328l-.254.053a1.5 1.5 0 00-1.037.989l-.36 1.353c-.125.466-.52.803-.955.803h-.305c-.435 0-.83-.337-.955-.803l-.36-1.353a1.5 1.5 0 00-1.037-.989l-.254-.053c-1.685-.356-2.5-1.776-2.5-3.328v-2.96c0-1.552.815-2.972 2.5-3.328l.254-.053a1.5 1.5 0 001.037-.989l.36-1.353zM10 7a1 1 0 100 2 1 1 0 000-2zm0 4a1 1 0 100 2 1 1 0 000-2z" clipRule="evenodd" />
+                    </svg>
                 </button>
 
+                {/* Send Button */}
                 <button 
-                    onClick={handleSend} 
-                    disabled={isTyping || !input.trim() || !isAuthReady || !currentSessionId || !userId}
-                    className="p-3 rounded-full bg-emerald-600 text-white font-semibold shadow-lg hover:bg-emerald-700 transition-colors disabled:bg-gray-400 disabled:cursor-not-allowed"
+                    className={`p-3 rounded-full transition duration-150 shadow-md ${
+                        isTyping || !input.trim()
+                            ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                            : 'bg-green-500 text-white hover:bg-green-600'
+                    }`}
+                    onClick={() => handleSend()} 
+                    disabled={isTyping || !input.trim()}
+                    title="Send Message"
                 >
-                    Send
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                        <path d="M10.894 2.553a1 1 0 00-1.788 0l-7 14a1 1 0 001.169 1.409l4.47-1.405 6.447 3.376a1 1 0 00.999 0l6.447-3.376 4.47 1.405a1 1 0 001.169-1.409l-7-14z" />
+                    </svg>
                 </button>
             </div>
         </div>
     );
 
+    // Final Application Layout (Desktop/Mobile Responsive)
     return (
-        <div className="flex flex-col md:flex-row items-center justify-center min-h-screen bg-gray-100 p-4 font-inter">
-            <div className="w-full max-w-6xl h-[90vh] flex bg-white rounded-xl shadow-2xl overflow-hidden transition-all duration-300">
+        <div className="flex flex-col items-center justify-center min-h-screen bg-gray-100 p-0 md:p-4 font-inter">
+            <style jsx="true">{`
+                /* Custom scrollbar for message area */
+                .custom-scrollbar::-webkit-scrollbar {
+                    width: 8px;
+                }
+                .custom-scrollbar::-webkit-scrollbar-track {
+                    background: #f1f1f1;
+                }
+                .custom-scrollbar::-webkit-scrollbar-thumb {
+                    background: #ccc;
+                    border-radius: 10px;
+                }
+                .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+                    background: #999;
+                }
+            `}</style>
+            
+            <div className="w-full h-screen md:w-full md:max-w-6xl md:h-[90vh] flex bg-white md:rounded-xl shadow-2xl overflow-hidden transition-all duration-300">
                 
                 {/* Sidebar (Conversations Menu) */}
-                <div className={`fixed inset-0 z-40 md:static md:z-auto ${isSidebarOpen ? 'block' : 'hidden'} md:block transition-transform duration-300`}>
+                <div 
+                    className={`fixed inset-0 z-40 md:static md:z-auto ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full'} md:translate-x-0 transition-transform duration-300 w-64 flex-shrink-0`}
+                >
                     <Sidebar 
                         sessions={sessions}
                         currentSessionId={currentSessionId}
                         switchSession={switchSession}
                         createNewSession={createSession}
                         deleteSession={deleteSession}
+                        userId={userId}
                     />
                     {/* Overlay for mobile view */}
                     {isSidebarOpen && window.innerWidth < 768 && (
                         <div 
-                            className="absolute inset-0 bg-black opacity-50 md:hidden" 
+                            className="absolute inset-0 bg-black opacity-50 md:hidden z-30" 
                             onClick={() => setIsSidebarOpen(false)}
                         ></div>
                     )}
                 </div>
 
                 {/* Main Chat Area */}
-                <div className="flex-1 flex flex-col min-w-0">
+                <div className="flex-1 flex flex-col min-w-0 z-10">
                     {chatContent}
                 </div>
             </div>
