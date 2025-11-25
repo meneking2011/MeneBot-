@@ -243,7 +243,7 @@ const Sidebar = React.memo(({ sessions, currentSessionId, switchSession, createN
     
     return (
         <div className="w-full md:w-64 bg-gray-50 border-r border-gray-200 p-4 flex flex-col transition-all duration-300">
-            <h2 className="text-xl font-bold text-gray-800 mb-4 flex items-center justify-between">
+            <h2 className="text-xl font-bold text-gray-800 mb-4 items-center justify-between">
                 Conversations
                 <button
                     onClick={createNewSession}
@@ -781,18 +781,19 @@ const handleSend = useCallback(async (transcript = null) => {
     );
 
     // Final Application Layout (Desktop/Mobile Responsive)
-    return (
-        <div className="flex flex-col min-h-screen w-full bg-gray-100 font-inter">
+    return (flex 
+    <div className="flex flex-col w-full min-h-[100dvh] bg-gray-100 font-inter">
+">
 
             {/* Tailwind CSS Script for Inter Font and General Styling */}
             <script src="https://cdn.tailwindcss.com"></script>
-            <style>
-                            {`
-                            html, body, #root {
-                height: 100%;
-                margin: 0;
-                padding: 0;
-            }
+           <style {
+             html, body, #root {
+                    margin: 0;
+                    padding: 0;
+                    height: 100%;
+                    width: 100%;
+                    overscroll-behavior: none;
 
                     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
                     body { font-family: 'Inter', sans-serif; }
@@ -801,7 +802,8 @@ const handleSend = useCallback(async (transcript = null) => {
                     .custom-scrollbar::-webkit-scrollbar-thumb { background: #ccc; border-radius: 10px; }
                     .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #999; }
                 `}
-            </style>
+                -webkit-tap-highlight-color: transparent;
+             }</style>
             
             <div className="w-full h-screen md:w-full md:max-w-6xl md:h-[90vh] flex bg-white md:rounded-xl shadow-2xl overflow-hidden transition-all duration-300">
                 
