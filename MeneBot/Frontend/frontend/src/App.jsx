@@ -4,10 +4,20 @@ import { v4 as uuidv4 } from "uuid";
 import axios from 'axios';
 
 // ----------------------------------------------
-//  LOCAL API CONFIG
+// LOCAL API CONFIG
 // ----------------------------------------------
-// NOTE: Must match the PORT in backend/server.js
-const BACKEND_URL = " https://menebot-1.onrender.com/api"; 
+// ⚠️ IMPORTANT: Set the base domain URL ONLY. The '/api' path is set in the axios.create() below.
+const BASE_RENDER_URL = "https://menebot-1.onrender.com"; 
+
+// ----------------------------------------------
+// AXIOS INSTANCE (THE FIX FOR 404 ERRORS)
+// ----------------------------------------------
+// We create a custom axios instance that ALWAYS uses the full, absolute base URL.
+// This prevents the GitHub Pages subfolder path (/MeneBot-/) from being incorrectly prepended.
+const api = axios.create({
+  baseURL: BASE_RENDER_URL + "/api" // Ensures all calls start with https://menebot-1.onrender.com/api
+});
+
 
 // ----------------------------------------------
 // UTILITIES
@@ -44,11 +54,11 @@ export default function App() {
 
   // -----------------------------
   // FETCH SESSIONS (Load Chats)
-  // This replaces the LOAD SESSIONS Firebase logic
   // -----------------------------
   const fetchSessions = useCallback(async () => {
     try {
-        const response = await axios.get(`${BACKEND_URL}/chats`);
+        // ➡️ Changed to use the 'api' instance and the relative route '/chats'
+        const response = await api.get("/chats");
         const arr = response.data.data || [];
         setSessions(arr);
         
@@ -64,7 +74,7 @@ export default function App() {
                 setCurrentSessionId(lastSessionId);
                 localStorage.setItem(LOCAL_KEY_LAST_SESSION, lastSessionId);
              } else {
-                 // No chats exist, create a new one
+                // No chats exist, create a new one
                  createSession();
              }
         } else if (arr.length === 0) {
@@ -83,7 +93,6 @@ export default function App() {
 
   // -----------------------------
   // FETCH MESSAGES (Load Messages)
-  // This replaces the LOAD MESSAGES Firebase logic
   // -----------------------------
   const fetchMessages = useCallback(async () => {
     if (!currentSessionId) {
@@ -92,7 +101,8 @@ export default function App() {
     }
 
     try {
-        const response = await axios.get(`${BACKEND_URL}/chats/${currentSessionId}/messages`);
+        // ➡️ Changed to use the 'api' instance and the relative route
+        const response = await api.get(`/chats/${currentSessionId}/messages`);
         const arr = response.data.data || [];
         setMessages(arr);
         scrollSmooth(messageEndRef);
@@ -109,11 +119,11 @@ export default function App() {
 
   // -----------------------------
   // CREATE SESSION
-  // This replaces the CREATE SESSION Firebase logic
   // -----------------------------
   const createSession = useCallback(async () => {
     try {
-        const response = await axios.post(`${BACKEND_URL}/chats`, { name: "New Chat" });
+        // ➡️ Changed to use the 'api' instance and the relative route
+        const response = await api.post("/chats", { name: "New Chat" });
         const newSession = response.data; // Should contain { id, name }
 
         setSessions(prev => [newSession, ...prev]);
@@ -129,13 +139,13 @@ export default function App() {
 
   // -----------------------------
   // DELETE SESSION
-  // This replaces the DELETE SESSION Firebase logic
   // -----------------------------
   const deleteSession = async (id) => {
     if (!window.confirm("Delete this conversation?")) return;
 
     try {
-        await axios.delete(`${BACKEND_URL}/chats/${id}`);
+        // ➡️ Changed to use the 'api' instance and the relative route
+        await api.delete(`/chats/${id}`);
         
         const remaining = sessions.filter((s) => s.id !== id);
         setSessions(remaining);
@@ -159,8 +169,7 @@ export default function App() {
   };
   
   // -----------------------------
-  // SEND MESSAGE (Updated for local API)
-  // This replaces the SEND MESSAGE Firebase and Streaming logic
+  // SEND MESSAGE
   // -----------------------------
   const handleSend = useCallback(async (manualText = null) => {
     const userText = manualText || input.trim();
@@ -182,8 +191,8 @@ export default function App() {
     scrollSmooth(messageEndRef);
     
     try {
-        // 2. Send message to the backend (Backend handles saving user message, calling AI, and saving bot message)
-        const response = await axios.post(`${BACKEND_URL}/chats/${currentSessionId}/messages`, {
+        // ➡️ Changed to use the 'api' instance and the relative route
+        const response = await api.post(`/chats/${currentSessionId}/messages`, {
             content: userText // Use 'content' for the body
         });
         
