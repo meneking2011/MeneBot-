@@ -6,13 +6,16 @@ const cors = require('cors');
 
 const app = express();
 // NOTE: Change the PORT if necessary, but 3001 is standard for development backends
-const PORT = 3001; 
+const PORT = process.env.PORT || 3001; 
+app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+});
 const DB_PATH = './chat_memory.db';
 
 // --- Configuration Variables ---
 // ⚠️ INPUT REQUIRED: Replace with your actual Gemini API Key
-const GEMINI_API_KEY = "AIzaSyBw-WpwSjHi3hlgYr1hoo5kctqiYRhe-hE"; 
-const MODEL_NAME = "gemini-1.5-flash";
+const GEMINI_API_KEY = process.env.AIzaSyBw-WpwSjHi3hlgYr1hoo5kctqiYRhe-hE; 
+const MODEL_NAME = "gemini-2.5-flash";
 const API_ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL_NAME}:generateContent`;
 
 
