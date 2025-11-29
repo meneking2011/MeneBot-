@@ -14,7 +14,7 @@ const DB_PATH = './chat_memory.db';
 
 // --- Configuration Variables ---
 // ⚠️ INPUT REQUIRED: Replace with your actual Gemini API Key
-const GEMINI_API_KEY = process.env.AIzaSyBw-WpwSjHi3hlgYr1hoo5kctqiYRhe-hE; 
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY; 
 const MODEL_NAME = "gemini-2.5-flash";
 const API_ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL_NAME}:generateContent`;
 
@@ -50,9 +50,11 @@ const db = new sqlite3.Database(DB_PATH, (err) => {
 // --- UTILITY: Gemini AI Call ---
 // Simplified from the streaming version in the original code, now handled on the backend
 async function askAI(userText, history) {
-    if (!GEMINI_API_KEY || GEMINI_API_KEY === "AIzaSyBw-WpwSjHi3hlgYr1hoo5kctqiYRhe-hE") {
-        throw new Error("Gemini API Key is not configured in server.js.");
-    }
+    // We only check if the key is missing or empty. The host (Render) provides the key.
+if (!GEMINI_API_KEY) {
+    // This will error out if Render fails to provide the environment variable
+    throw new Error("Gemini API Key is missing. Ensure the GEMINI_API_KEY environment variable is set.");
+}
 
     const formattedHistory = history.map((msg) => ({
         role: msg.sender === "user" ? "user" : "model",
