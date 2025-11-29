@@ -7,7 +7,7 @@ import axios from 'axios';
 //  LOCAL API CONFIG
 // ----------------------------------------------
 // NOTE: Must match the PORT in backend/server.js
-const BACKEND_URL = "http://localhost:3001/api"; 
+const BACKEND_URL = " https://menebot-1.onrender.com/api"; 
 
 // ----------------------------------------------
 // UTILITIES
